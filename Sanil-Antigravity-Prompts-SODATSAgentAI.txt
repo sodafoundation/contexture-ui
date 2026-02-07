@@ -1,4 +1,8 @@
-I want to take the base code for a time series AI agent from a github repository and build a react based chatbot user interface. You can help?
+The base code is created with AntiGravity. 
+There were multiple fixes, refinement based on testing, and feature additions before the initial commit.
+The guideline prompt for codegen of the GUI is given below!
+
+I want to take the base code for a time series AI agent from a github repository and build a react based chatbot user interface.
 >>
 
 1. Github Repository URL = https://github.com/sodafoundation-ai/ts-ai-agent
