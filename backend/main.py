@@ -5,8 +5,7 @@ from typing import List, Optional, Dict
 import uuid
 import json
 import os
-import subprocess
-import yaml
+import httpx
 from datetime import datetime
 
 app = FastAPI()
@@ -21,15 +20,14 @@ app.add_middleware(
 )
 
 # Configuration
-# Set this to the path of your ts-ai-agent repository
-TS_AGENT_PATH = os.environ.get("TS_AGENT_PATH", "../ts-ai-agent")
-USE_REAL_AGENT = os.environ.get("USE_REAL_AGENT", "false").lower() == "true"
+BACKEND_SERVICE_URL = os.environ.get("BACKEND_SERVICE_URL", "http://localhost:8002")
 
 # Data Models
 class ChatMessage(BaseModel):
     role: str  # "user" or "bot"
     content: str
     timestamp: str
+    ocs_data: Optional[Dict] = None  # Store OCS input/output data
 
 class ChatSession(BaseModel):
     id: str
@@ -66,61 +64,54 @@ def save_data(data: Dict[str, ChatSession]):
         # Convert ChatSession objects to dicts for JSON serialization
         json.dump({k: v.model_dump() for k, v in data.items()}, f, indent=4)
 
-def query_ts_agent(query: str) -> str:
+async def query_backend_service(query: str, context: str = "") -> tuple[str, Dict]:
     """
-    Query the ts-ai-agent with a natural language query.
-    Returns the agent's response as a formatted string.
+    Query the contexture backend service with a natural language query.
+    Returns the agent's response and OCS data as a tuple.
     """
-    if not USE_REAL_AGENT:
-        # Mock response
-        return f"**Mock Response**\n\nThis is a simulated response to: '{query}'\n\nTo enable real agent integration:\n1. Clone https://github.com/rohithvaidya/ts-ai-agent (dev branch)\n2. Set TS_AGENT_PATH environment variable to the repository path\n3. Set USE_REAL_AGENT=true\n4. Configure Prometheus and Ollama as per the repository README"
-    
     try:
-        # Create a temporary query file
-        temp_query_file = f"temp_query_{uuid.uuid4().hex[:8]}.yaml"
-        query_data = {"queries": [query]}
-        
-        with open(temp_query_file, "w") as f:
-            yaml.dump(query_data, f)
-        
-        # Run the ts-ai-agent CLI
-        cmd = [
-            "python",
-            os.path.join(TS_AGENT_PATH, "pkg", "cli.py"),
-            "--query-set", temp_query_file,
-            "--copilot", "DYNAMIC_PROMPT",
-            "--prometheus-config", os.path.join(TS_AGENT_PATH, "config", "prometheus_config.yaml")
-        ]
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=TS_AGENT_PATH
-        )
-        
-        # Clean up temp file
-        if os.path.exists(temp_query_file):
-            os.remove(temp_query_file)
-        
-        if result.returncode != 0:
-            return f"**Error executing agent**\n\nStderr: {result.stderr}\n\nMake sure:\n1. Prometheus is running\n2. Ollama is running with a model\n3. Agent is properly configured"
-        
-        # Parse the output (adjust based on actual output format)
-        # The agent outputs YAML files, so we'd need to read the output file
-        # For now, return stdout
-        if result.stdout:
-            return f"**Agent Response**\n\n{result.stdout}"
-        else:
-            return "Agent executed successfully but returned no output."
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{BACKEND_SERVICE_URL}/api/query",
+                json={"query": query, "context": context}
+            )
+            response.raise_for_status()
             
-    except subprocess.TimeoutExpired:
-        return "**Error**: Query timed out after 30 seconds."
+            data = response.json()
+            
+            # Format the response
+            formatted_response = f"{data.get('summary', 'No summary available')}"
+            
+            ocs_data = {
+                "ocs_input": data.get("ocs_input", ""),
+                "ocs_output": data.get("ocs_output", ""),
+                "workflow": data.get("workflow", []),
+                "results": data.get("results", [])
+            }
+            
+            return formatted_response, ocs_data
+            
+    except httpx.TimeoutException:
+        error_msg = "**Error**: Query timed out after 120 seconds. The backend service may be processing a complex query."
+        return error_msg, {}
+    except httpx.ConnectError:
+        error_msg = f"**Error**: Cannot connect to backend service at {BACKEND_SERVICE_URL}\n\nPlease ensure:\n1. Backend service is running: `python contexture-core/pkg/mcp/client_dynamic.py`\n2. The service is accessible at {BACKEND_SERVICE_URL}"
+        return error_msg, {}
+    except httpx.HTTPStatusError as e:
+        error_msg = f"**Error**: Backend service returned error {e.response.status_code}\n\nDetails: {e.response.text}"
+        return error_msg, {}
+    except json.JSONDecodeError as e:
+        error_msg = f"**Error**: Invalid JSON response from backend service\n\nDetails: {str(e)}"
+        return error_msg, {}
     except Exception as e:
-        return f"**Error**: {str(e)}"
+        error_msg = f"**Error**: Unexpected error communicating with backend service\n\nDetails: {str(e)}"
+        return error_msg, {}
 
 # Routes
+
+@app.get("/")
+def root():
+    return {"message": "Contexture Frontend Backend", "status": "running"}
 
 @app.get("/api/sessions", response_model=List[ChatSession])
 def get_sessions():
@@ -172,7 +163,7 @@ def get_history(session_id: str):
     return data[session_id].messages
 
 @app.post("/api/chat")
-def chat(request: ChatRequest):
+async def chat(request: ChatRequest):
     data = load_data()
     if request.session_id not in data:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -181,17 +172,19 @@ def chat(request: ChatRequest):
     user_msg = ChatMessage(
         role="user",
         content=request.query,
-        timestamp=datetime.now().isoformat()
+        timestamp=datetime.now().isoformat(),
+        ocs_data=None
     )
     data[request.session_id].messages.append(user_msg)
     
-    # 2. Query the TS Agent
-    response_content = query_ts_agent(request.query)
+    # 2. Query the Backend Service
+    response_content, ocs_data = await query_backend_service(request.query)
     
     bot_msg = ChatMessage(
         role="bot",
         content=response_content,
-        timestamp=datetime.now().isoformat()
+        timestamp=datetime.now().isoformat(),
+        ocs_data=ocs_data if ocs_data else None
     )
     data[request.session_id].messages.append(bot_msg)
     
@@ -199,18 +192,33 @@ def chat(request: ChatRequest):
     
     return {
         "response": response_content,
+        "ocs_data": ocs_data,
         "history": data[request.session_id].messages
     }
 
 @app.get("/api/config")
-def get_config():
+async def get_config():
     """Return current configuration status"""
+    backend_available = False
+    backend_error = None
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{BACKEND_SERVICE_URL}/health")
+            backend_available = response.status_code == 200
+    except httpx.ConnectError:
+        backend_error = "Cannot connect to backend service"
+    except httpx.TimeoutException:
+        backend_error = "Backend service timeout"
+    except Exception as e:
+        backend_error = str(e)
+    
     return {
-        "use_real_agent": USE_REAL_AGENT,
-        "ts_agent_path": TS_AGENT_PATH,
-        "agent_available": os.path.exists(os.path.join(TS_AGENT_PATH, "pkg", "cli.py")) if TS_AGENT_PATH else False
+        "backend_service_url": BACKEND_SERVICE_URL,
+        "backend_available": backend_available,
+        "backend_error": backend_error
     }
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8003)
