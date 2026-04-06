@@ -125,7 +125,7 @@ function App() {
 
   const sendToBackend = async (sessionId, text) => {
     // Optimistic Update
-    const userMsg = { role: 'user', content: text, timestamp: new Date().toISOString() };
+    const userMsg = { role: 'user', content: text, timestamp: new Date().toISOString(), ocs_data: null };
     setMessages(prev => [...prev, userMsg]);
     setLoading(true);
 
@@ -138,8 +138,9 @@ function App() {
       // Add error message
       setMessages(prev => [...prev, {
         role: 'bot',
-        content: 'Error: Could not connect to the agent backend. Please ensure the server is running.',
-        timestamp: new Date().toISOString()
+        content: 'Error: Could not connect to the backend service. Please ensure both backend services are running (port 8000 and 8002).',
+        timestamp: new Date().toISOString(),
+        ocs_data: null
       }]);
     } finally {
       setLoading(false);
