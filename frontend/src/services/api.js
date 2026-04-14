@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = 'http://localhost:8001/api';
+const API_URL = 'http://20.205.160.206:8003/api';
 
 const api = axios.create({
     baseURL: API_URL,
@@ -36,6 +36,11 @@ export const getHistory = async (sessionId) => {
 
 export const sendMessage = async (sessionId, query) => {
     const response = await api.post('/chat', { session_id: sessionId, query });
+    return response.data;
+};
+
+export const getConfig = async () => {
+    const response = await api.get('/config');
     return response.data;
 };
 
